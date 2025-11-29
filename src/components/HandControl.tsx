@@ -1,0 +1,265 @@
+'use client';
+
+import React, { useEffect, useRef, useState } from 'react';
+import { FilesetResolver, HandLandmarker, HandLandmarkerResult } from '@mediapipe/tasks-vision';
+import { Canvas, useFrame } from '@react-three/fiber';
+import { Float, Edges } from '@react-three/drei';
+import * as THREE from 'three';
+
+// 3D Component that reacts to hands
+function Hologram({ handResult }: { handResult: HandLandmarkerResult | null }) {
+    const meshRef = useRef<THREE.Mesh>(null);
+    const [isDragging, setIsDragging] = useState(false);
+
+    // Store the object's current position to allow relative movement or staying in place
+    const positionRef = useRef(new THREE.Vector3(0, 0, 0));
+
+    useFrame((state, delta) => {
+        if (!meshRef.current) return;
+
+        // Basic animation (always rotate slightly)
+        meshRef.current.rotation.x += delta * 0.2;
+        meshRef.current.rotation.y += delta * 0.1;
+
+        if (handResult && handResult.landmarks.length > 0) {
+            const hand = handResult.landmarks[0];
+            const thumbTip = hand[4];
+            const indexTip = hand[8];
+
+            // 1. Calculate Pinch Distance (are fingers closed?)
+            const pinchDistance = Math.sqrt(
+                Math.pow(thumbTip.x - indexTip.x, 2) +
+                Math.pow(thumbTip.y - indexTip.y, 2)
+            );
+            const isPinching = pinchDistance < 0.05;
+
+            // 2. Calculate Hand Position in 3D Space
+            const midX = (thumbTip.x + indexTip.x) / 2;
+            const midY = (thumbTip.y + indexTip.y) / 2;
+
+            // Map normalized coordinates (0-1) to 3D space
+            // Note: These multipliers (10 and 8) must match the camera FOV/aspect ratio for accurate alignment
+            const handX = (0.5 - midX) * 10;
+            const handY = (0.5 - midY) * 8;
+            const handPos = new THREE.Vector3(handX, handY, 0);
+
+            // 3. Interaction Logic
+            if (isDragging) {
+                // If currently dragging, check if we should release
+                if (!isPinching) {
+                    setIsDragging(false);
+                } else {
+                    // Continue dragging - move object to hand position
+                    // Smooth lerp for better feel
+                    positionRef.current.lerp(handPos, 0.2);
+                }
+            } else {
+                // If not dragging, check if we should grab
+                // We need to check distance between HAND and OBJECT
+                const distanceToObj = handPos.distanceTo(positionRef.current);
+                const GRAB_RADIUS = 1.5; // How close you need to be to grab
+
+                if (isPinching && distanceToObj < GRAB_RADIUS) {
+                    setIsDragging(true);
+                }
+            }
+
+            // Apply position
+            meshRef.current.position.copy(positionRef.current);
+
+            // Visual Feedback
+            if (isDragging) {
+                // Grabbing state
+                // @ts-ignore
+                meshRef.current.material.color.setHex(0xff0055);
+                // @ts-ignore
+                meshRef.current.material.emissiveIntensity = 2;
+                meshRef.current.rotation.x += delta * 5;
+                meshRef.current.rotation.y += delta * 5;
+            } else {
+                // Hover/Idle state
+                const distanceToObj = handPos.distanceTo(positionRef.current);
+                const isHovering = distanceToObj < 1.5;
+
+                if (isHovering) {
+                    // Hover state (ready to grab)
+                    // @ts-ignore
+                    meshRef.current.material.color.setHex(0xffaa00); // Orange/Gold
+                    // @ts-ignore
+                    meshRef.current.material.emissiveIntensity = 1.5;
+                } else {
+                    // Idle state
+                    // @ts-ignore
+                    meshRef.current.material.color.setHex(0x00ffff); // Cyan
+                    // @ts-ignore
+                    meshRef.current.material.emissiveIntensity = 1;
+                }
+            }
+
+        } else {
+            setIsDragging(false);
+            // No hand detected
+            // @ts-ignore
+            meshRef.current.material.color.setHex(0x0088ff);
+            // @ts-ignore
+            meshRef.current.material.emissiveIntensity = 0.5;
+        }
+    });
+
+    return (
+        <Float speed={isDragging ? 0 : 2} rotationIntensity={isDragging ? 0 : 0.5} floatIntensity={isDragging ? 0 : 0.5}>
+            <group>
+                <mesh ref={meshRef} position={[0, 0, 0]}>
+                    <icosahedronGeometry args={[1.5, 0]} />
+                    <meshStandardMaterial
+                        color="#0088ff"
+                        emissive="#0044aa"
+                        emissiveIntensity={0.5}
+                        transparent
+                        opacity={0.2}
+                        roughness={0}
+                        metalness={1}
+                    />
+                    <Edges
+                        scale={1.05}
+                        threshold={15}
+                        color={isDragging ? "#ff0055" : "#00ffff"}
+                    />
+                </mesh>
+            </group>
+        </Float>
+    );
+}
+
+export default function HandControl() {
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const [handLandmarker, setHandLandmarker] = useState<HandLandmarker | null>(null);
+    const [handResult, setHandResult] = useState<HandLandmarkerResult | null>(null);
+
+    useEffect(() => {
+        const initHandLandmarker = async () => {
+            const vision = await FilesetResolver.forVisionTasks(
+                'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm'
+            );
+            const landmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: '/models/hand_landmarker.task',
+                    delegate: 'GPU',
+                },
+                runningMode: 'VIDEO',
+                numHands: 2,
+            });
+            setHandLandmarker(landmarker);
+        };
+
+        initHandLandmarker();
+    }, []);
+
+    useEffect(() => {
+        if (!handLandmarker) return;
+
+        const startWebcam = async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 1280, height: 720, facingMode: 'user' },
+                });
+                if (videoRef.current) {
+                    videoRef.current.srcObject = stream;
+                    videoRef.current.addEventListener('loadeddata', predictWebcam);
+                }
+            } catch (err) {
+                console.error(err);
+            }
+        };
+
+        startWebcam();
+
+        let lastVideoTime = -1;
+        let animationFrameId: number;
+
+        const predictWebcam = () => {
+            if (videoRef.current && handLandmarker) {
+                let startTimeMs = performance.now();
+                if (videoRef.current.currentTime !== lastVideoTime) {
+                    lastVideoTime = videoRef.current.currentTime;
+                    const result = handLandmarker.detectForVideo(videoRef.current, startTimeMs);
+                    setHandResult(result);
+                }
+                animationFrameId = requestAnimationFrame(predictWebcam);
+            }
+        };
+
+        return () => {
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+        };
+    }, [handLandmarker]);
+
+    return (
+        <div className="relative h-screen w-screen overflow-hidden bg-black">
+            {/* Video Background */}
+            <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="absolute inset-0 h-full w-full object-cover opacity-50"
+                style={{ transform: 'scaleX(-1)' }}
+            />
+
+            {/* HUD Overlay */}
+            <div className="absolute inset-0 pointer-events-none z-10">
+                {/* Top Left Status */}
+                <div className="absolute top-10 left-10 p-6 border-l-4 border-cyan-400 bg-black/60 backdrop-blur-md shadow-[0_0_20px_rgba(34,211,238,0.2)]">
+                    <div className="text-cyan-400 font-mono text-2xl font-bold tracking-widest animate-pulse">
+                        J.A.R.V.I.S.
+                    </div>
+                    <div className="text-cyan-200 font-mono text-sm mt-2 flex items-center gap-2">
+                        <div className={`w-3 h-3 rounded-full ${handResult && handResult.landmarks.length > 0 ? 'bg-red-500 animate-ping' : 'bg-cyan-500'}`} />
+                        STATUS: {handResult && handResult.landmarks.length > 0 ? 'TARGET LOCKED' : 'SCANNING SECTOR...'}
+                    </div>
+                </div>
+
+                {/* Bottom Right System Load */}
+                <div className="absolute bottom-10 right-10 w-80 border-2 border-cyan-500/50 bg-black/60 backdrop-blur-md rounded-lg p-4 shadow-[0_0_30px_rgba(34,211,238,0.1)]">
+                    <div className="text-cyan-400 font-mono text-xs mb-2 flex justify-between">
+                        <span>SYSTEM LOAD</span>
+                        <span>84%</span>
+                    </div>
+                    <div className="h-32 w-full grid grid-cols-8 gap-1">
+                        {[...Array(32)].map((_, i) => (
+                            <div
+                                key={i}
+                                className={`rounded-sm transition-all duration-500 ${Math.random() > 0.3
+                                        ? 'bg-cyan-500/80 shadow-[0_0_5px_rgba(34,211,238,0.5)]'
+                                        : 'bg-cyan-900/30'
+                                    } ${Math.random() > 0.8 ? 'animate-pulse' : ''}`}
+                            />
+                        ))}
+                    </div>
+                    <div className="mt-2 h-1 w-full bg-cyan-900/50 rounded-full overflow-hidden">
+                        <div className="h-full bg-cyan-400 w-[84%] animate-pulse" />
+                    </div>
+                </div>
+
+                {/* Center Reticle */}
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-64 border border-cyan-500/20 rounded-full flex items-center justify-center">
+                    <div className="w-60 h-60 border border-cyan-500/10 rounded-full animate-spin-slow" />
+                    <div className="w-2 h-2 bg-cyan-500 rounded-full" />
+                </div>
+
+                {/* Vignette & Scanlines */}
+                <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] z-50 bg-[length:100%_2px,3px_100%] pointer-events-none opacity-20" />
+            </div>
+
+            {/* 3D Scene */}
+            <div className="absolute inset-0 z-20">
+                <Canvas camera={{ position: [0, 0, 5], fov: 50 }}>
+                    <ambientLight intensity={1} />
+                    <pointLight position={[10, 10, 10]} intensity={2} />
+                    <pointLight position={[-10, -10, -10]} color="#00ffff" intensity={1} />
+                    <Hologram handResult={handResult} />
+                </Canvas>
+            </div>
+        </div>
+    );
+}
