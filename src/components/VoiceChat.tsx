@@ -2,11 +2,21 @@
 
 import { useConversation } from "@elevenlabs/react";
 import { Mic, MicOff, Loader2 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useState, useRef, useEffect } from "react";
 import AIVisualizer from "./AIVisualizer";
 
 export default function VoiceChat() {
     const [isListening, setIsListening] = useState(false);
+    const [messages, setMessages] = useState<{ source: 'user' | 'ai'; text: string }[]>([]);
+    const messagesEndRef = useRef<HTMLDivElement>(null);
+
+    const scrollToBottom = () => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    };
+
+    useEffect(() => {
+        scrollToBottom();
+    }, [messages]);
 
     const conversation = useConversation({
         onConnect: () => {
@@ -17,8 +27,14 @@ export default function VoiceChat() {
             console.log("Disconnected from ElevenLabs Agent");
             setIsListening(false);
         },
-        onMessage: (message) => {
+        onMessage: (message: any) => {
             console.log("Message:", message);
+            // Adjust this based on the actual message structure from ElevenLabs SDK
+            // Assuming message might be an object with source and text, or just text
+            const text = message.message || message.text || (typeof message === 'string' ? message : JSON.stringify(message));
+            const source = message.source === 'user' ? 'user' : 'ai';
+
+            setMessages((prev) => [...prev, { source, text }]);
         },
         onError: (error) => {
             console.error("ElevenLabs Error:", error);
@@ -32,9 +48,9 @@ export default function VoiceChat() {
             setIsListening(false);
         } else {
             try {
-                // Agent ID from user request
                 await conversation.startSession({
-                    agentId: "agent_9001kb9bscp2egc819gj36p5dc3v",
+                    agentId: process.env.NEXT_PUBLIC_ELEVENLABS_AGENT_ID || "",
+                    // @ts-ignore
                 });
             } catch (error) {
                 console.error("Failed to start conversation:", error);
@@ -45,7 +61,7 @@ export default function VoiceChat() {
     const isActive = conversation.status === "connected" && conversation.isSpeaking;
 
     return (
-        <div className="fixed top-4 right-4 w-full max-w-sm z-50 pointer-events-auto">
+        <div className="fixed top-4 right-4 w-full max-w-sm z-50 pointer-events-auto flex flex-col gap-4">
             <div className="bg-black/30 backdrop-blur-sm border border-cyan-500/20 rounded-2xl p-4 shadow-[0_0_30px_rgba(34,211,238,0.1)]">
 
                 {/* AI Visualizer Area */}
@@ -93,6 +109,25 @@ export default function VoiceChat() {
                     </button>
                 </div>
             </div>
+
+            {/* Conversation History */}
+            {messages.length > 0 && (
+                <div className="bg-black/30 backdrop-blur-sm border border-cyan-500/20 rounded-2xl p-4 shadow-[0_0_30px_rgba(34,211,238,0.1)] max-h-60 overflow-y-auto">
+                    <div className="flex flex-col gap-2">
+                        {messages.map((msg, index) => (
+                            <div key={index} className={`flex ${msg.source === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                <div className={`max-w-[80%] p-2 rounded-lg text-sm ${msg.source === 'user'
+                                    ? 'bg-cyan-500/20 text-cyan-100 border border-cyan-500/30'
+                                    : 'bg-slate-800/50 text-slate-200 border border-slate-700'
+                                    }`}>
+                                    {msg.text}
+                                </div>
+                            </div>
+                        ))}
+                        <div ref={messagesEndRef} />
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
