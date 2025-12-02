@@ -48,9 +48,9 @@ export default function VoiceChat() {
             setIsListening(false);
         } else {
             try {
+                // @ts-ignore
                 await conversation.startSession({
                     agentId: process.env.NEXT_PUBLIC_ELEVENLABS_AGENT_ID || "",
-                    // @ts-ignore
                 });
             } catch (error) {
                 console.error("Failed to start conversation:", error);

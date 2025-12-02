@@ -3,16 +3,21 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { FilesetResolver, HandLandmarker, HandLandmarkerResult } from '@mediapipe/tasks-vision';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { Float, Edges } from '@react-three/drei';
+import { Float, Edges, Trail } from '@react-three/drei';
 import * as THREE from 'three';
 
 // 3D Component that reacts to hands
-function Hologram({ handResult }: { handResult: HandLandmarkerResult | null }) {
+function Hologram({ handResultRef }: { handResultRef: React.MutableRefObject<HandLandmarkerResult | null> }) {
     const meshRef = useRef<THREE.Mesh>(null);
     const [isDragging, setIsDragging] = useState(false);
 
-    // Store the object's current position to allow relative movement or staying in place
+    // Store the object's current position
     const positionRef = useRef(new THREE.Vector3(0, 0, 0));
+
+    // Prediction State
+    const lastHandPosRef = useRef(new THREE.Vector3(0, 0, 0));
+    const lastTimeRef = useRef(0);
+    const velocityRef = useRef(new THREE.Vector3(0, 0, 0));
 
     useFrame((state, delta) => {
         if (!meshRef.current) return;
@@ -21,43 +26,61 @@ function Hologram({ handResult }: { handResult: HandLandmarkerResult | null }) {
         meshRef.current.rotation.x += delta * 0.2;
         meshRef.current.rotation.y += delta * 0.1;
 
+        const handResult = handResultRef.current;
+        const currentTime = state.clock.getElapsedTime();
+
         if (handResult && handResult.landmarks.length > 0) {
             const hand = handResult.landmarks[0];
             const thumbTip = hand[4];
             const indexTip = hand[8];
 
-            // 1. Calculate Pinch Distance (are fingers closed?)
+            // 1. Calculate Pinch Distance
             const pinchDistance = Math.sqrt(
                 Math.pow(thumbTip.x - indexTip.x, 2) +
                 Math.pow(thumbTip.y - indexTip.y, 2)
             );
             const isPinching = pinchDistance < 0.05;
 
-            // 2. Calculate Hand Position in 3D Space
+            // 2. Calculate Raw Hand Position
             const midX = (thumbTip.x + indexTip.x) / 2;
             const midY = (thumbTip.y + indexTip.y) / 2;
-
-            // Map normalized coordinates (0-1) to 3D space
-            // Note: These multipliers (10 and 8) must match the camera FOV/aspect ratio for accurate alignment
             const handX = (0.5 - midX) * 10;
             const handY = (0.5 - midY) * 8;
-            const handPos = new THREE.Vector3(handX, handY, 0);
+            const rawHandPos = new THREE.Vector3(handX, handY, 0);
 
-            // 3. Interaction Logic
+            // 3. Calculate Velocity & Prediction
+            const dt = currentTime - lastTimeRef.current;
+            if (dt > 0 && dt < 0.1) { // Only calculate if valid frame time
+                const displacement = rawHandPos.clone().sub(lastHandPosRef.current);
+                const currentVelocity = displacement.divideScalar(dt);
+
+                // Smooth velocity to reduce jitter
+                velocityRef.current.lerp(currentVelocity, 0.5);
+            }
+
+            lastHandPosRef.current.copy(rawHandPos);
+            lastTimeRef.current = currentTime;
+
+            // PREDICTION: Extrapolate future position
+            // "Look ahead" by ~50ms (0.05s) to compensate for lag
+            const PREDICTION_FACTOR = 0.05;
+            const predictedPos = rawHandPos.clone().add(velocityRef.current.clone().multiplyScalar(PREDICTION_FACTOR));
+
+            // 4. Interaction Logic
             if (isDragging) {
-                // If currently dragging, check if we should release
                 if (!isPinching) {
                     setIsDragging(false);
                 } else {
-                    // Continue dragging - move object to hand position
-                    // Smooth lerp for better feel
-                    positionRef.current.lerp(handPos, 0.2);
+                    // Dynamic Lerp: Move faster when hand moves faster
+                    const speed = velocityRef.current.length();
+                    // Base lerp 0.2, max 0.8. If speed > 5, max out.
+                    const dynamicLerp = Math.min(0.8, 0.2 + (speed / 10));
+
+                    positionRef.current.lerp(predictedPos, dynamicLerp);
                 }
             } else {
-                // If not dragging, check if we should grab
-                // We need to check distance between HAND and OBJECT
-                const distanceToObj = handPos.distanceTo(positionRef.current);
-                const GRAB_RADIUS = 1.5; // How close you need to be to grab
+                const distanceToObj = rawHandPos.distanceTo(positionRef.current);
+                const GRAB_RADIUS = 1.5;
 
                 if (isPinching && distanceToObj < GRAB_RADIUS) {
                     setIsDragging(true);
@@ -74,23 +97,23 @@ function Hologram({ handResult }: { handResult: HandLandmarkerResult | null }) {
                 meshRef.current.material.color.setHex(0xff0055);
                 // @ts-ignore
                 meshRef.current.material.emissiveIntensity = 2;
-                meshRef.current.rotation.x += delta * 5;
-                meshRef.current.rotation.y += delta * 5;
+                meshRef.current.rotation.x += delta * 10; // Spin faster
+                meshRef.current.rotation.y += delta * 10;
             } else {
                 // Hover/Idle state
-                const distanceToObj = handPos.distanceTo(positionRef.current);
+                const distanceToObj = rawHandPos.distanceTo(positionRef.current);
                 const isHovering = distanceToObj < 1.5;
 
                 if (isHovering) {
-                    // Hover state (ready to grab)
+                    // Hover state
                     // @ts-ignore
-                    meshRef.current.material.color.setHex(0xffaa00); // Orange/Gold
+                    meshRef.current.material.color.setHex(0xffaa00);
                     // @ts-ignore
                     meshRef.current.material.emissiveIntensity = 1.5;
                 } else {
                     // Idle state
                     // @ts-ignore
-                    meshRef.current.material.color.setHex(0x00ffff); // Cyan
+                    meshRef.current.material.color.setHex(0x00ffff);
                     // @ts-ignore
                     meshRef.current.material.emissiveIntensity = 1;
                 }
@@ -109,23 +132,30 @@ function Hologram({ handResult }: { handResult: HandLandmarkerResult | null }) {
     return (
         <Float speed={isDragging ? 0 : 2} rotationIntensity={isDragging ? 0 : 0.5} floatIntensity={isDragging ? 0 : 0.5}>
             <group>
-                <mesh ref={meshRef} position={[0, 0, 0]}>
-                    <icosahedronGeometry args={[1.5, 0]} />
-                    <meshStandardMaterial
-                        color="#0088ff"
-                        emissive="#0044aa"
-                        emissiveIntensity={0.5}
-                        transparent
-                        opacity={0.2}
-                        roughness={0}
-                        metalness={1}
-                    />
-                    <Edges
-                        scale={1.05}
-                        threshold={15}
-                        color={isDragging ? "#ff0055" : "#00ffff"}
-                    />
-                </mesh>
+                <Trail
+                    width={1}
+                    length={4}
+                    color={isDragging ? "#ff0055" : "#00ffff"}
+                    attenuation={(t) => t * t}
+                >
+                    <mesh ref={meshRef} position={[0, 0, 0]}>
+                        <icosahedronGeometry args={[1.5, 0]} />
+                        <meshStandardMaterial
+                            color="#0088ff"
+                            emissive="#0044aa"
+                            emissiveIntensity={0.5}
+                            transparent
+                            opacity={0.2}
+                            roughness={0}
+                            metalness={1}
+                        />
+                        <Edges
+                            scale={1.05}
+                            threshold={15}
+                            color={isDragging ? "#ff0055" : "#00ffff"}
+                        />
+                    </mesh>
+                </Trail>
             </group>
         </Float>
     );
@@ -134,7 +164,11 @@ function Hologram({ handResult }: { handResult: HandLandmarkerResult | null }) {
 export default function HandControl() {
     const videoRef = useRef<HTMLVideoElement>(null);
     const [handLandmarker, setHandLandmarker] = useState<HandLandmarker | null>(null);
-    const [handResult, setHandResult] = useState<HandLandmarkerResult | null>(null);
+
+    // Optimization: Use ref instead of state for high-frequency updates
+    const handResultRef = useRef<HandLandmarkerResult | null>(null);
+    // Only use state for UI updates that need to re-render (like "Target Locked" text)
+    const [isHandDetected, setIsHandDetected] = useState(false);
 
     useEffect(() => {
         const initHandLandmarker = async () => {
@@ -148,6 +182,10 @@ export default function HandControl() {
                 },
                 runningMode: 'VIDEO',
                 numHands: 2,
+                // @ts-ignore
+                minHandDetectionConfidence: 0.5,
+                minHandPresenceConfidence: 0.5,
+                minTrackingConfidence: 0.5,
             });
             setHandLandmarker(landmarker);
         };
@@ -183,7 +221,16 @@ export default function HandControl() {
                 if (videoRef.current.currentTime !== lastVideoTime) {
                     lastVideoTime = videoRef.current.currentTime;
                     const result = handLandmarker.detectForVideo(videoRef.current, startTimeMs);
-                    setHandResult(result);
+
+                    // Update ref directly - NO RE-RENDER
+                    handResultRef.current = result;
+
+                    // Only trigger re-render if detection state changes
+                    const hasHand = result.landmarks.length > 0;
+                    setIsHandDetected(prev => {
+                        if (prev !== hasHand) return hasHand;
+                        return prev;
+                    });
                 }
                 animationFrameId = requestAnimationFrame(predictWebcam);
             }
@@ -214,8 +261,8 @@ export default function HandControl() {
                         J.A.R.V.I.S.
                     </div>
                     <div className="text-cyan-200 font-mono text-sm mt-2 flex items-center gap-2">
-                        <div className={`w-3 h-3 rounded-full ${handResult && handResult.landmarks.length > 0 ? 'bg-red-500 animate-ping' : 'bg-cyan-500'}`} />
-                        STATUS: {handResult && handResult.landmarks.length > 0 ? 'TARGET LOCKED' : 'SCANNING SECTOR...'}
+                        <div className={`w-3 h-3 rounded-full ${isHandDetected ? 'bg-red-500 animate-ping' : 'bg-cyan-500'}`} />
+                        STATUS: {isHandDetected ? 'TARGET LOCKED' : 'SCANNING SECTOR...'}
                     </div>
                 </div>
 
@@ -230,8 +277,8 @@ export default function HandControl() {
                             <div
                                 key={i}
                                 className={`rounded-sm transition-all duration-500 ${Math.random() > 0.3
-                                        ? 'bg-cyan-500/80 shadow-[0_0_5px_rgba(34,211,238,0.5)]'
-                                        : 'bg-cyan-900/30'
+                                    ? 'bg-cyan-500/80 shadow-[0_0_5px_rgba(34,211,238,0.5)]'
+                                    : 'bg-cyan-900/30'
                                     } ${Math.random() > 0.8 ? 'animate-pulse' : ''}`}
                             />
                         ))}
@@ -257,7 +304,7 @@ export default function HandControl() {
                     <ambientLight intensity={1} />
                     <pointLight position={[10, 10, 10]} intensity={2} />
                     <pointLight position={[-10, -10, -10]} color="#00ffff" intensity={1} />
-                    <Hologram handResult={handResult} />
+                    <Hologram handResultRef={handResultRef} />
                 </Canvas>
             </div>
         </div>
