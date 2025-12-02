@@ -19,6 +19,11 @@ function Hologram({ handResultRef }: { handResultRef: React.MutableRefObject<Han
     const lastTimeRef = useRef(0);
     const velocityRef = useRef(new THREE.Vector3(0, 0, 0));
 
+    // Visibility State (Scale)
+    const scaleRef = useRef(0); // Start invisible
+    const targetScaleRef = useRef(0); // Start invisible
+    const lastGestureTimeRef = useRef(0);
+
     useFrame((state, delta) => {
         if (!meshRef.current) return;
 
@@ -29,7 +34,47 @@ function Hologram({ handResultRef }: { handResultRef: React.MutableRefObject<Han
         const handResult = handResultRef.current;
         const currentTime = state.clock.getElapsedTime();
 
+        // --- GESTURE DETECTION & SCALE LOGIC ---
         if (handResult && handResult.landmarks.length > 0) {
+            const hand = handResult.landmarks[0];
+            const wrist = hand[0];
+
+            // Check if hand is OPEN (Palm) or CLOSED (Fist)
+            // Simple heuristic: Average distance of finger tips from wrist
+            const tips = [hand[4], hand[8], hand[12], hand[16], hand[20]]; // Thumb, Index, Middle, Ring, Pinky
+            const pips = [hand[2], hand[6], hand[10], hand[14], hand[18]]; // Knuckles (approx)
+
+            let extendedFingers = 0;
+            for (let i = 0; i < 5; i++) {
+                const tipDist = Math.sqrt(Math.pow(tips[i].x - wrist.x, 2) + Math.pow(tips[i].y - wrist.y, 2));
+                const pipDist = Math.sqrt(Math.pow(pips[i].x - wrist.x, 2) + Math.pow(pips[i].y - wrist.y, 2));
+                if (tipDist > pipDist * 1.2) { // Tip is significantly further than knuckle
+                    extendedFingers++;
+                }
+            }
+
+            // Debounce gestures (prevent flickering)
+            if (currentTime - lastGestureTimeRef.current > 0.5) {
+                if (extendedFingers >= 4) {
+                    // OPEN HAND -> SPAWN
+                    targetScaleRef.current = 1;
+                    lastGestureTimeRef.current = currentTime;
+                } else if (extendedFingers <= 1) {
+                    // CLOSED FIST -> DESPAWN
+                    targetScaleRef.current = 0;
+                    lastGestureTimeRef.current = currentTime;
+                }
+            }
+        }
+
+        // Animate Scale
+        // Smoothly lerp current scale to target scale
+        scaleRef.current += (targetScaleRef.current - scaleRef.current) * delta * 5;
+        meshRef.current.scale.setScalar(scaleRef.current);
+
+        // --- HAND TRACKING LOGIC ---
+        // Only track if visible (scale > 0.1)
+        if (handResult && handResult.landmarks.length > 0 && scaleRef.current > 0.1) {
             const hand = handResult.landmarks[0];
             const thumbTip = hand[4];
             const indexTip = hand[8];
@@ -121,7 +166,7 @@ function Hologram({ handResultRef }: { handResultRef: React.MutableRefObject<Han
 
         } else {
             setIsDragging(false);
-            // No hand detected
+            // No hand detected or not visible
             // @ts-ignore
             meshRef.current.material.color.setHex(0x0088ff);
             // @ts-ignore
@@ -138,7 +183,7 @@ function Hologram({ handResultRef }: { handResultRef: React.MutableRefObject<Han
                     color={isDragging ? "#ff0055" : "#00ffff"}
                     attenuation={(t) => t * t}
                 >
-                    <mesh ref={meshRef} position={[0, 0, 0]}>
+                    <mesh ref={meshRef} position={[0, 0, 0]} scale={0}>
                         <icosahedronGeometry args={[1.5, 0]} />
                         <meshStandardMaterial
                             color="#0088ff"
